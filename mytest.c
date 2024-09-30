@@ -22,5 +22,9 @@ int main()
   setnice(1, -100);
   ps(0);
 
+  printf(1, "%d\n", getnice(1));
+  printf(1, "%d\n", getnice(2));
+  printf(1, "%d\n", getnice(3));
+
   exit();
 }
