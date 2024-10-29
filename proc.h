@@ -50,6 +50,12 @@ struct proc {
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
   int nice;                    // nice vlaue
+
+  uint weight;
+  uint runtime;                
+  uint total_runtime;
+  uint vruntime;
+  uint timeslice;
 };
 
 // Process memory is laid out contiguously, low addresses first:

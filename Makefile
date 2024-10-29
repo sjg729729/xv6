@@ -185,6 +185,8 @@ UPROGS=\
 	_setnice\
 	_ps\
 	_mytest\
+	_pa2t\
+	_pa2t2\
 
 fs.img: mkfs README $(UPROGS)
 	./mkfs fs.img README $(UPROGS)

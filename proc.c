@@ -17,6 +17,7 @@ static struct proc *initproc;
 int nextpid = 1;
 extern void forkret(void);
 extern void trapret(void);
+extern uint ticks;
 
 static void wakeup1(void *chan);
 
@@ -25,6 +26,41 @@ pinit(void)
 {
   initlock(&ptable.lock, "ptable");
 }
+
+
+
+// ------ weight, total_weight 설정 ------
+uint weight[40] = {
+  /* 0 */  88761,   71755,   56483,   46273,   36291,
+  /* 5 */  29154,   23254,   18705,   14949,   11916,  
+  /* 10 */  9548,    7620,    6100,    4904,    3906,
+  /* 15 */  3121,    2501,    1991,    1586,    1277,
+  /* 20 */  1024,     820,     655,     526,     423,
+  /* 25 */   335,     272,     215,     172,     137,
+  /* 30 */   110,      87,      70,      56,      45,
+  /* 35 */    36,      29,      23,      18,      15
+};
+
+uint total_weight;
+void set_total_weight()
+{
+  struct proc *p;
+  int sum = 0;
+
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    if(p->state == RUNNABLE){
+      sum += weight[p->nice];
+    }
+  }
+  // cprintf("Get Total Weight...: %d\n", sum);
+  total_weight = sum; 
+
+  return;
+}
+// -----------------------------------------
+
+
+
 
 // Must be called with interrupts disabled
 int
@@ -91,6 +127,12 @@ found:
 
   // set default nice value
   p->nice = 20;
+
+  p->weight = weight[p->nice];
+  p->runtime = 0;
+  p->total_runtime = 0;
+  p->vruntime = 0;
+  p->timeslice = 0;
 
   release(&ptable.lock);
 
@@ -219,6 +261,13 @@ fork(void)
 
   np->state = RUNNABLE;
 
+  // 자식 프로세스 설정
+  np->nice = curproc->nice;
+  np->vruntime = curproc->vruntime;
+  np->runtime = 0;
+  np->total_runtime = curproc->total_runtime;
+  np->weight = curproc->weight;
+
   release(&ptable.lock);
 
   return pid;
@@ -333,26 +382,64 @@ scheduler(void)
     // Enable interrupts on this processor.
     sti();
 
+    
+
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
+
+    // vruntime 가장 작은 process 찾기
+    struct proc *target = 0;
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
       if(p->state != RUNNABLE)
         continue;
 
-      // Switch to chosen process.  It is the process's job
-      // to release ptable.lock and then reacquire it
-      // before jumping back to us.
-      c->proc = p;
-      switchuvm(p);
-      p->state = RUNNING;
+      // 초기 설정
+      if(!target) 
+        target = p;
 
-      swtch(&(c->scheduler), p->context);
+      // target 업데이트
+      if(p->vruntime < target->vruntime)
+        target = p;
+    }
+
+    // total_weight 설정
+    set_total_weight();
+    // context switch (스케줄러 <-> 프로세스)
+    if(target){
+      
+      if(total_weight){
+        target->timeslice = 10 * 1000 * target->weight / total_weight;
+        // cprintf("target pid: %d\n", target->pid);
+      }
+
+      c->proc = target;
+      switchuvm(target);
+      target->state = RUNNING;
+
+      swtch(&(c->scheduler), target->context);
       switchkvm();
 
-      // Process is done running for now.
-      // It should have changed its p->state before coming back.
       c->proc = 0;
     }
+
+    // for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    //   if(p->state != RUNNABLE)
+    //     continue;
+
+    //   // Switch to chosen process.  It is the process's job
+    //   // to release ptable.lock and then reacquire it
+    //   // before jumping back to us.
+    //   c->proc = p;
+    //   switchuvm(p);
+    //   p->state = RUNNING;
+
+    //   swtch(&(c->scheduler), p->context);
+    //   switchkvm();
+
+    //   // Process is done running for now.
+    //   // It should have changed its p->state before coming back.
+    //   c->proc = 0;
+    // }
     release(&ptable.lock);
 
   }
@@ -390,6 +477,7 @@ yield(void)
 {
   acquire(&ptable.lock);  //DOC: yieldlock
   myproc()->state = RUNNABLE;
+  myproc()->runtime = 0;
   sched();
   release(&ptable.lock);
 }
@@ -462,9 +550,34 @@ wakeup1(void *chan)
 {
   struct proc *p;
 
+  // vruntime 재설정 -> 최소 vruntime - 1tick vruntime
+  // 없다면 0으로 설정
+  struct proc *target = 0;
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if(p->state != RUNNABLE)
+        continue;
+
+      // 초기 설정
+      if(!target) 
+        target = p;
+
+      // target 업데이트
+      if(p->vruntime < target->vruntime)
+        target = p;
+    }
+
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
-    if(p->state == SLEEPING && p->chan == chan)
+    if(p->state == SLEEPING && p->chan == chan){
       p->state = RUNNABLE;
+
+      // vruntime 0 으로 설정
+      if(!target)
+        p->vruntime = 0;
+      else
+        p->vruntime = target->vruntime - (1000 * 1024 / p->weight);
+      
+    }
+      
 }
 
 // Wake up all processes sleeping on chan.
@@ -573,6 +686,7 @@ setnice(int pid, int value)
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
     if(p->pid == pid){
       p->nice = value;
+      p->weight = weight[p->nice];
       release(&ptable.lock);
       return 0;
     }
@@ -595,12 +709,12 @@ ps(int pid)
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
     if((p->pid == pid) || (pid == 0)){
       if(isTrue == 1){
-        cprintf("%s\t\t %s\t\t %s\t\t %s\n", "name", "pid", "state", "priority");
+        cprintf("%s\t\t\t %s\t\t %s\t\t %s\t\t %s\t\t %s\t\t %s\t\t %s %d\n", "name", "pid", "state", "priority", "runtime/weight", "runtime", "vruntime", "tick", ticks*1000);
         isTrue = 0;
       }
 
       if(p->state != 0){ 
-        cprintf("%s\t\t %d\t\t %s\t %d\n", p->name, p->pid, states[p->state], p -> nice);
+        cprintf("%s\t\t\t %d\t\t %s\t %d\t\t\t %d\t\t\t %d\t\t\t %d\n", p->name, p->pid, states[p->state], p->nice, p->total_runtime/p->weight, p->total_runtime, p->vruntime);
       }
     }
   }
